@@ -1,0 +1,25 @@
+[project]
+name = "self-healing-locator"
+version = "0.1.0"
+description = "A self-healing locator agent for Playwright: detects broken UI test locators and heals them via DOM-similarity heuristics."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "playwright>=1.40",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[project.scripts]
+shl = "self_healing_locator.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["self_healing_locator*"]
