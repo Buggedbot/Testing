@@ -33,6 +33,21 @@ def test_build_prompt_includes_target_and_indexed_candidates():
     assert payload["candidates"][1]["text"] == "Cancel"
 
 
+def test_build_prompt_includes_failed_selectors_when_present():
+    prompt = build_prompt(
+        "login_button", "#login-btn", _fp(), [_fp()], failed_selectors=["#act-1", "#act-2"]
+    )
+    payload = json.loads(prompt[prompt.index("{"):])
+    assert payload["previously_tried_and_failed"] == ["#act-1", "#act-2"]
+    assert "do not suggest" in prompt.lower()
+
+
+def test_build_prompt_omits_failed_selectors_key_when_empty():
+    prompt = build_prompt("login_button", "#login-btn", _fp(), [_fp()])
+    payload = json.loads(prompt[prompt.index("{"):])
+    assert "previously_tried_and_failed" not in payload
+
+
 def test_parse_response_valid():
     parsed = parse_response('{"candidate_index": 1, "confidence": 0.8, "reasoning": "text match"}', 3)
     assert parsed == {"candidate_index": 1, "confidence": 0.8, "reasoning": "text match"}

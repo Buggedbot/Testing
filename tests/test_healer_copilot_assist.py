@@ -68,3 +68,24 @@ def test_assist_not_written_when_disabled(tmp_path, page):
     json_path, md_path = copilot_assist.assist_paths(store_path)
     assert not json_path.exists()
     assert not md_path.exists()
+
+
+def test_assist_entry_lists_previously_failed_selectors(tmp_path, page):
+    store_path = tmp_path / "locators.yaml"
+    healer = Healer(store_path, confidence_threshold=0.9, copilot_assist=True)
+
+    page.goto((FIXTURES / "login_v1.html").as_uri())
+    healer.locate(page, "login_button", selector="#login-btn")
+
+    page.goto((FIXTURES / "login_v2.html").as_uri())
+    with pytest.raises(HealingFailedError):
+        healer.locate(page, "login_button")  # first failure: records "#login-btn"
+
+    with pytest.raises(HealingFailedError):
+        healer.locate(page, "login_button")  # second failure: still just "#login-btn" (dedup)
+
+    _, md_path = copilot_assist.assist_paths(store_path)
+    content = md_path.read_text()
+    assert "Already tried and still broken" in content
+    assert "#login-btn" in content
+    assert healer.store.get("login_button").failed_selectors == ["#login-btn"]

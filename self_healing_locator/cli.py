@@ -25,7 +25,8 @@ def _cmd_list(args: argparse.Namespace) -> None:
     for name, spec in sorted(specs.items()):
         heals = f" (healed {spec.heal_count}x)" if spec.heal_count else ""
         frame = f" [in frame: {spec.frame_selector}]" if spec.frame_selector else ""
-        print(f"{name:30s} {spec.selector}{frame}{heals}")
+        failed = f" [{len(spec.failed_selectors)} failed attempt(s)]" if spec.failed_selectors else ""
+        print(f"{name:30s} {spec.selector}{frame}{heals}{failed}")
 
 
 def _cmd_report(args: argparse.Namespace) -> None:
@@ -105,6 +106,7 @@ def _cmd_assist_apply(args: argparse.Namespace) -> None:
         return 1
     old_selector = spec.selector
     store.update_selector(args.name, args.selector, spec.fingerprint, frame_selector=args.frame_selector)
+    store.clear_failed_attempts(args.name)
     store.log_heal_event(
         HealEvent(
             name=args.name,

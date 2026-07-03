@@ -44,6 +44,15 @@ can't confidently resolve on their own.
    `locators.report.json`. Tests that reference elements by name never need
    a code change.
 
+A selector that gets tried and still doesn't resolve — from any tier, or set
+by hand via `shl assist-apply` — is remembered (`failed_selectors` on the
+spec) and never proposed again while the underlying page hasn't changed.
+Without this, a wrong pick just gets suggested again on every retry, since
+the DOM the scoring runs against hasn't changed and selector-building is
+deterministic — this is what "self-healing feels inconsistent" usually
+means in practice. The list clears automatically the next time that locator
+heals successfully.
+
 > **Note on this repo's fixtures:** the bundled demo pages are synthetic
 > test fixtures, not real client data, so their scraped text/attributes are
 > written to `locators.yaml`/`*.report.json` as-is. If you point this at a

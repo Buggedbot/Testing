@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from .llm_healer import build_prompt
 
@@ -36,21 +36,26 @@ _HEADER = (
 )
 
 
-def render_entry(name: str, old_selector: str, target_fp: dict[str, Any], candidates: list[dict[str, Any]], reason: str) -> str:
-    prompt = build_prompt(name, old_selector, target_fp, candidates)
-    return "\n".join(
-        [
-            f"## {name}",
-            "",
-            f"- Old selector: `{old_selector}`",
-            f"- Why it needs help: {reason}",
-            "",
-            "```text",
-            prompt,
-            "```",
-            "",
-        ]
-    )
+def render_entry(
+    name: str,
+    old_selector: str,
+    target_fp: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    reason: str,
+    failed_selectors: Optional[list[str]] = None,
+) -> str:
+    prompt = build_prompt(name, old_selector, target_fp, candidates, failed_selectors=failed_selectors)
+    lines = [
+        f"## {name}",
+        "",
+        f"- Old selector: `{old_selector}`",
+        f"- Why it needs help: {reason}",
+    ]
+    if failed_selectors:
+        tried = ", ".join(f"`{s}`" for s in failed_selectors)
+        lines.append(f"- Already tried and still broken (don't suggest these again): {tried}")
+    lines += ["", "```text", prompt, "```", ""]
+    return "\n".join(lines)
 
 
 def assist_paths(store_path: str | Path) -> tuple[Path, Path]:
@@ -91,10 +96,11 @@ def record_assist(
     target_fp: dict[str, Any],
     candidates: list[dict[str, Any]],
     reason: str,
+    failed_selectors: Optional[list[str]] = None,
 ) -> None:
     json_path, md_path = assist_paths(store_path)
     sections = _load(json_path)
-    sections[name] = render_entry(name, old_selector, target_fp, candidates, reason)
+    sections[name] = render_entry(name, old_selector, target_fp, candidates, reason, failed_selectors=failed_selectors)
     _save(json_path, md_path, sections)
 
 

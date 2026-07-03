@@ -68,14 +68,25 @@ def _describe(fp: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_prompt(
-    name: str, old_selector: str, target_fp: dict[str, Any], candidates: list[dict[str, Any]]
+    name: str,
+    old_selector: str,
+    target_fp: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    failed_selectors: Optional[list[str]] = None,
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "locator_name": name,
         "old_selector": old_selector,
         "target_element": _describe(target_fp),
         "candidates": [dict(index=i, **_describe(fp)) for i, fp in enumerate(candidates)],
     }
+    failed_note = ""
+    if failed_selectors:
+        payload["previously_tried_and_failed"] = list(failed_selectors)
+        failed_note = (
+            " Selectors listed in `previously_tried_and_failed` were already tried and did "
+            "NOT work -- do not suggest a candidate that would resolve to one of them again."
+        )
     return (
         "A UI test locator broke because the page changed. `target_element` describes "
         "the element the last time the locator worked. `candidates` are same-tag elements "
@@ -83,9 +94,9 @@ def build_prompt(
         "element after a redesign, weighing visible text and semantic attributes (name, "
         "type, role, aria-label) more heavily than id/class (which are expected to have "
         "changed), and DOM position as a tie-breaker. If nothing plausibly matches, return "
-        "-1. Respond with ONLY a single-line JSON object containing exactly three keys: "
-        "candidate_index (integer), confidence (a number from 0 to 1), and reasoning (a "
-        "short string). No markdown fences, no shell command, no other text.\n\n"
+        f"-1.{failed_note} Respond with ONLY a single-line JSON object containing exactly "
+        "three keys: candidate_index (integer), confidence (a number from 0 to 1), and "
+        "reasoning (a short string). No markdown fences, no shell command, no other text.\n\n"
         + json.dumps(payload, indent=2)
     )
 
@@ -116,6 +127,7 @@ def select_candidate(
     target_fp: dict[str, Any],
     candidates: list[dict[str, Any]],
     min_confidence: float,
+    failed_selectors: Optional[list[str]] = None,
 ) -> Optional[tuple[int, float, str]]:
     """Ask the backend to pick a candidate. Returns (index, confidence,
     reasoning), or None if the call failed, found no match, or fell below
@@ -124,7 +136,7 @@ def select_candidate(
     if not candidates:
         return None
 
-    prompt = build_prompt(name, old_selector, target_fp, candidates)
+    prompt = build_prompt(name, old_selector, target_fp, candidates, failed_selectors=failed_selectors)
     text = backend(prompt)
     if not text:
         return None

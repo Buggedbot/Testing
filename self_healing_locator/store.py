@@ -31,6 +31,10 @@ class LocatorSpec:
     source_line: Optional[int] = None
     updated_at: float = field(default_factory=time.time)
     heal_count: int = 0
+    # Selectors that were previously tried (by any tier -- heuristic, LLM, or
+    # a human via `shl assist-apply`) and still didn't resolve on a later run.
+    # Never re-proposed by any healing tier while they're in this list.
+    failed_selectors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -46,6 +50,7 @@ class LocatorSpec:
             source_line=data.get("source_line"),
             updated_at=data.get("updated_at", time.time()),
             heal_count=data.get("heal_count", 0),
+            failed_selectors=data.get("failed_selectors") or [],
         )
 
 
@@ -132,6 +137,21 @@ class LocatorStore:
         spec.heal_count += 1
         self.save()
         return spec
+
+    def record_failed_attempt(self, name: str, selector: str) -> LocatorSpec:
+        """Mark `selector` as tried-and-still-broken for `name`, so healing
+        tiers stop proposing it again. Idempotent."""
+        spec = self._specs[name]
+        if selector not in spec.failed_selectors:
+            spec.failed_selectors.append(selector)
+            self.save()
+        return spec
+
+    def clear_failed_attempts(self, name: str) -> None:
+        spec = self._specs.get(name)
+        if spec and spec.failed_selectors:
+            spec.failed_selectors = []
+            self.save()
 
     def log_heal_event(self, event: HealEvent) -> None:
         events = []

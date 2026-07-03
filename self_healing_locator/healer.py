@@ -15,6 +15,13 @@ found -- rewrites the locator store with the new selector (and, if the match
 lives inside an iframe, the selector for that iframe too) and returns a
 working Locator for the *current* page.
 
+A selector that was tried and still didn't resolve (from any tier, or set by
+hand via `shl assist-apply`) is remembered on the spec (`failed_selectors`)
+and never proposed again while the page hasn't otherwise changed -- without
+this, a wrong pick just gets suggested again every retry, since the DOM the
+scoring runs against hasn't changed and selector-building is deterministic.
+The list clears automatically the next time that locator heals successfully.
+
 If the best match looks destructive (matches the risk deny-list -- "delete",
 "remove", "archive", ...), it is **not** auto-applied: it's queued to
 `locators.pending.json` and `HealingRequiresReviewError` is raised so a wrong
@@ -269,7 +276,10 @@ class Healer:
         return resolved
 
     def _try_llm_heal(
-        self, name: str, spec: LocatorSpec, scored: list[tuple[float, dict, Optional[str]]]
+        self,
+        name: str,
+        spec: LocatorSpec,
+        scored: list[tuple[float, dict, Optional[str]]],
     ) -> Optional[tuple[float, dict, Optional[str]]]:
         top = scored[: self.llm_max_candidates]
         if not top:
@@ -283,6 +293,7 @@ class Healer:
                 target_fp=spec.fingerprint,
                 candidates=[candidate_fp for _, candidate_fp, _ in top],
                 min_confidence=self.llm_min_confidence,
+                failed_selectors=spec.failed_selectors,
             )
         except Exception:
             return None
@@ -300,6 +311,15 @@ class Healer:
             reverse=True,
         )
 
+        # Never re-propose a selector already known not to work -- otherwise a
+        # bad pick (from any tier, or a human via `assist-apply`) just gets
+        # suggested again every retry, since the page hasn't changed and
+        # build_selector() is deterministic.
+        if spec.failed_selectors:
+            scored = [
+                triple for triple in scored if build_selector(triple[1]) not in spec.failed_selectors
+            ]
+
         best_score, best_fp, best_frame_selector = scored[0] if scored else (0.0, None, None)
         source = "heuristic"
 
@@ -310,6 +330,7 @@ class Healer:
                 source = "llm"
 
         if best_fp is None or best_score < self.confidence_threshold:
+            updated_spec = self.store.record_failed_attempt(name, spec.selector)
             if self.copilot_assist:
                 copilot_assist.record_assist(
                     self.store.path,
@@ -321,12 +342,14 @@ class Healer:
                         f"best candidate scored {best_score:.2f}, below "
                         f"confidence_threshold {self.confidence_threshold:.2f}"
                     ),
+                    failed_selectors=updated_spec.failed_selectors,
                 )
             raise HealingFailedError(name, spec.selector, best_score, self.confidence_threshold)
 
         new_selector = build_selector(best_fp)
         old_selector = spec.selector
 
+        self.store.clear_failed_attempts(name)
         if self.copilot_assist:
             copilot_assist.clear_assist(self.store.path, name)
 

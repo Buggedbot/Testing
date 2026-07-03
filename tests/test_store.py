@@ -94,3 +94,33 @@ def test_add_pending_replaces_existing_entry_for_same_name(tmp_path):
 def test_pop_pending_missing_returns_none(tmp_path):
     store = LocatorStore(tmp_path / "locators.yaml")
     assert store.pop_pending("nope") is None
+
+
+def test_record_failed_attempt_appends_and_dedupes(tmp_path):
+    store = LocatorStore(tmp_path / "locators.yaml")
+    store.put(LocatorSpec(name="btn", selector="#old", fingerprint={}))
+
+    store.record_failed_attempt("btn", "#tried-1")
+    store.record_failed_attempt("btn", "#tried-2")
+    store.record_failed_attempt("btn", "#tried-1")  # duplicate, no-op
+
+    assert store.get("btn").failed_selectors == ["#tried-1", "#tried-2"]
+
+
+def test_failed_selectors_persist_across_instances(tmp_path):
+    path = tmp_path / "locators.yaml"
+    store = LocatorStore(path)
+    store.put(LocatorSpec(name="btn", selector="#old", fingerprint={}))
+    store.record_failed_attempt("btn", "#tried-1")
+
+    reloaded = LocatorStore(path)
+    assert reloaded.get("btn").failed_selectors == ["#tried-1"]
+
+
+def test_clear_failed_attempts(tmp_path):
+    store = LocatorStore(tmp_path / "locators.yaml")
+    store.put(LocatorSpec(name="btn", selector="#old", fingerprint={}))
+    store.record_failed_attempt("btn", "#tried-1")
+
+    store.clear_failed_attempts("btn")
+    assert store.get("btn").failed_selectors == []
