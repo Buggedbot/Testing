@@ -6,7 +6,9 @@ test suites against client CRM applications (Salesforce Lightning, Dynamics
 id got regenerated, a class was renamed, a component library was swapped),
 the agent detects the failure, re-identifies the same element using
 DOM-similarity heuristics, and updates your test's locators so the *next*
-run just works — no LLM calls, no flaky retries on the wrong element.
+run just works — no LLM calls required, no flaky retries on the wrong
+element. An opt-in GenAI tier (see below) can pick up cases the heuristics
+can't confidently resolve on their own.
 
 ## How it works
 
@@ -154,6 +156,45 @@ shl approve <name> locators.yaml        # apply a pending heal
 shl reject  <name> locators.yaml        # discard a pending heal
 ```
 
+### Optional GenAI fallback tier
+
+Heuristic scoring is the default and only requires local DOM comparison — no
+network calls. When it *can't* clear `confidence_threshold` on its own (a
+redesign changed enough that nothing scores confidently), you can opt into an
+LLM tier that gets the same scored candidates and picks from them:
+
+```python
+healer = Healer("locators.yaml", llm_fallback=True)   # llm_backend="copilot_cli" by default
+```
+
+`llm_backend` selects what actually answers the prompt:
+
+| `llm_backend=` | What it calls | Needs |
+| --- | --- | --- |
+| `"copilot_cli"` (default) | Shells out to `gh copilot suggest` | `gh` CLI + the `gh-copilot` extension, logged in |
+| `"anthropic"` | Claude via the `anthropic` SDK | `pip install -e ".[llm]"` + API credentials |
+| any `(prompt: str) -> str \| None` callable | your own backend | whatever it needs |
+
+**Be aware of what `"copilot_cli"` actually is.** `gh copilot suggest` is
+built to suggest *shell/git/gh commands*, not to answer arbitrary
+structured-JSON questions — there's no official "ask Copilot anything, get
+JSON back" API. This backend asks it for a JSON object anyway and scrapes the
+first `{...}`-looking blob out of whatever it prints
+(`self_healing_locator/llm_healer.py::CopilotCliBackend`). It works often
+enough to be worth having as a fallback, but expect it to come back empty
+more often than a real completion API would — and that's fine: `select_candidate`
+treats "no usable response" as just another way for the LLM tier to defer,
+same as if `llm_fallback` were off, and healing falls through to
+`HealingFailedError`. If your environment does have real LLM API access,
+`llm_backend="anthropic"` is a much more reliable choice.
+
+**The risk gate applies regardless of source.** An LLM-selected candidate
+that matches the deny-list is queued to `locators.pending.json` exactly like
+a heuristic one — the GenAI tier can widen what gets *found*, but it never
+widens what gets auto-applied without review. Every heal event records which
+tier produced it (`source: "heuristic"` or `"llm"`), visible via
+`shl report`.
+
 ## Demos
 
 Two narrated end-to-end scenarios, run against a real headless Chromium via
@@ -183,6 +224,7 @@ self_healing_locator/
   scoring.py            # weighted DOM-similarity scoring
   selector_builder.py   # turns a healed fingerprint back into a CSS selector (element + iframe)
   risk.py                 # destructive-candidate deny-list
+  llm_healer.py            # opt-in GenAI fallback tier (pluggable backend: Copilot CLI / Claude / custom)
   store.py               # locators.yaml + healing report + pending-review persistence
   patcher.py              # rewrites inline selector literals in test source
   healer.py               # Healer: locate() / locate_inline() / multi-frame heal orchestration
@@ -202,6 +244,11 @@ tests/                      # unit tests + end-to-end tests (real browser via Pl
   may fail even if the element itself would otherwise match.
 - The risk deny-list is a coarse text/attribute filter, not semantic
   understanding — tune `risk_keywords=` for your client's terminology.
+- The default `llm_backend="copilot_cli"` is a best-effort scrape of a tool
+  (`gh copilot suggest`) that isn't designed for this — see § Optional GenAI
+  fallback tier. It's a bonus tier, not a dependency: heuristic-only mode
+  (`llm_fallback=False`, the default) is fully local and works with zero AI
+  tooling installed.
 
 ## Tests
 

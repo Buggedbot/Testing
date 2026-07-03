@@ -35,9 +35,10 @@ def _cmd_report(args: argparse.Namespace) -> None:
         return
     for event in events[-args.limit :]:
         ts = datetime.fromtimestamp(event["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+        source = event.get("source", "heuristic")
         print(
             f"[{ts}] {event['name']}: {event['old_selector']} -> "
-            f"{event['new_selector']} (confidence={event['score']:.2f})"
+            f"{event['new_selector']} (confidence={event['score']:.2f}, source={source})"
         )
 
 

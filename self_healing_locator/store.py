@@ -55,6 +55,7 @@ class HealEvent:
     old_selector: str
     new_selector: str
     score: float
+    source: str = "heuristic"  # "heuristic" or "llm"
     timestamp: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:
@@ -73,6 +74,7 @@ class PendingHeal:
     fingerprint: dict[str, Any]
     score: float
     reason: str
+    source: str = "heuristic"  # "heuristic" or "llm"
     created_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict[str, Any]:

@@ -13,6 +13,12 @@ dependencies = [
 dev = [
     "pytest>=7.0",
 ]
+# Only needed for the opt-in llm_backend="anthropic" GenAI fallback tier.
+# The default llm_backend="copilot_cli" needs no extra pip package -- it
+# shells out to the `gh` CLI, which must be separately installed/authenticated.
+llm = [
+    "anthropic>=0.68.0",
+]
 
 [project.scripts]
 shl = "self_healing_locator.cli:main"

@@ -21,7 +21,28 @@ If the best match looks destructive (matches the risk deny-list -- "delete",
 guess can never auto-click something like "Delete" on a client's live CRM.
 Run `shl review` / `shl approve` to inspect and apply it.
 
-No LLM/network calls are involved; healing is pure DOM heuristics.
+By default, healing is pure DOM heuristics -- no LLM/network calls. Pass
+`llm_fallback=True` to add an opt-in GenAI tier: only when heuristic scoring
+can't clear `confidence_threshold` on its own, the same scored candidates are
+handed to an LLM backend to pick from. `llm_backend` selects which one:
+
+- `"copilot_cli"` (default) -- shells out to `gh copilot suggest`. Best-effort:
+  that command is a shell-command assistant, not a general JSON-completion
+  API, so this scrapes a JSON object out of its output and simply finds
+  nothing usable (falls back to heuristic-only) more often than a real
+  completion API would. Use this where the only AI tooling available is a
+  GitHub Copilot seat and `gh` CLI -- no separate LLM API key needed.
+- `"anthropic"` -- calls Claude via the `anthropic` SDK, for environments
+  that do have real LLM API access. Requires `pip install anthropic` and
+  credentials.
+- any callable `(prompt: str) -> str | None` -- for a custom backend or a
+  test double.
+
+An LLM-selected candidate still goes through the same risk gate as a
+heuristic one before it's ever auto-applied -- the safety guarantee doesn't
+change based on which tier found the match, and a backend that can't answer
+just means healing falls through to `HealingFailedError` like any other
+low-confidence case.
 
 For multi-client setups, pass `client_id=` instead of `store_path=` to keep
 each client's locator store, heal report, and pending queue isolated under
@@ -39,12 +60,13 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Any, Iterable, Optional
 
 from playwright.sync_api import Frame, Locator, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from . import fingerprint as fp
+from . import llm_healer
 from .exceptions import HealingFailedError, HealingRequiresReviewError, LocatorNotFoundError
 from .patcher import patch_source_selector
 from .risk import DEFAULT_RISK_KEYWORDS, is_risky
@@ -65,6 +87,11 @@ class Healer:
         auto_patch_source: bool = True,
         require_review_for_risky: bool = True,
         risk_keywords: Iterable[str] = DEFAULT_RISK_KEYWORDS,
+        llm_fallback: bool = False,
+        llm_backend: Any = "copilot_cli",
+        llm_model: str = llm_healer.MODEL_DEFAULT,
+        llm_min_confidence: float = 0.6,
+        llm_max_candidates: int = 15,
     ):
         if client_id is not None:
             if store_path is not None:
@@ -80,6 +107,11 @@ class Healer:
         self.auto_patch_source = auto_patch_source
         self.require_review_for_risky = require_review_for_risky
         self.risk_keywords = list(risk_keywords)
+        self.llm_fallback = llm_fallback
+        self.llm_backend = llm_backend
+        self.llm_model = llm_model
+        self.llm_min_confidence = llm_min_confidence
+        self.llm_max_candidates = llm_max_candidates
 
     # -- public API ---------------------------------------------------
 
@@ -215,6 +247,42 @@ class Healer:
             results.extend((candidate, frame_selector) for candidate in candidates)
         return results
 
+    def _resolve_llm_backend(self) -> llm_healer.Backend:
+        if not isinstance(self.llm_backend, str):
+            return self.llm_backend  # already a callable/backend instance
+        if self.llm_backend == "copilot_cli":
+            resolved: llm_healer.Backend = llm_healer.CopilotCliBackend()
+        elif self.llm_backend == "anthropic":
+            resolved = llm_healer.AnthropicBackend(model=self.llm_model)
+        else:
+            raise ValueError(f"Unknown llm_backend: {self.llm_backend!r}")
+        self.llm_backend = resolved  # memoize
+        return resolved
+
+    def _try_llm_heal(
+        self, name: str, spec: LocatorSpec, scored: list[tuple[float, dict, Optional[str]]]
+    ) -> Optional[tuple[float, dict, Optional[str]]]:
+        top = scored[: self.llm_max_candidates]
+        if not top:
+            return None
+        try:
+            backend = self._resolve_llm_backend()
+            pick = llm_healer.select_candidate(
+                backend,
+                name=name,
+                old_selector=spec.selector,
+                target_fp=spec.fingerprint,
+                candidates=[candidate_fp for _, candidate_fp, _ in top],
+                min_confidence=self.llm_min_confidence,
+            )
+        except Exception:
+            return None
+        if pick is None:
+            return None
+        idx, confidence, _reasoning = pick
+        _, candidate_fp, frame_selector = top[idx]
+        return confidence, candidate_fp, frame_selector
+
     def _heal(self, page: Page, name: str, spec: LocatorSpec, timeout: float) -> Locator:
         candidates = self._collect_candidates(page, spec.fingerprint.get("tag", ""))
         scored = sorted(
@@ -224,6 +292,14 @@ class Healer:
         )
 
         best_score, best_fp, best_frame_selector = scored[0] if scored else (0.0, None, None)
+        source = "heuristic"
+
+        if self.llm_fallback and (best_fp is None or best_score < self.confidence_threshold):
+            llm_pick = self._try_llm_heal(name, spec, scored)
+            if llm_pick is not None:
+                best_score, best_fp, best_frame_selector = llm_pick
+                source = "llm"
+
         if best_fp is None or best_score < self.confidence_threshold:
             raise HealingFailedError(name, spec.selector, best_score, self.confidence_threshold)
 
@@ -240,13 +316,16 @@ class Healer:
                     fingerprint=best_fp,
                     score=best_score,
                     reason="best candidate matched the risk deny-list",
+                    source=source,
                 )
             )
             raise HealingRequiresReviewError(name, old_selector, new_selector, best_score)
 
         self.store.update_selector(name, new_selector, best_fp, frame_selector=best_frame_selector)
         self.store.log_heal_event(
-            HealEvent(name=name, old_selector=old_selector, new_selector=new_selector, score=best_score)
+            HealEvent(
+                name=name, old_selector=old_selector, new_selector=new_selector, score=best_score, source=source
+            )
         )
 
         if self.auto_patch_source and spec.source_file:
