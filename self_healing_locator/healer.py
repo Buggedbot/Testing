@@ -7,11 +7,25 @@ Usage (locator-map mode -- recommended):
     button = healer.locate(page, "login_button")                         # later runs: resolves
     button.click()
 
-If the stored selector fails to attach within `timeout`, the healer snapshots
-candidate elements on the page, scores them against the last-known-good
-fingerprint, and -- if a confident match is found -- rewrites the locator
-store with the new selector and returns a working Locator for the *current*
-page. No LLM/network calls are involved; healing is pure DOM heuristics.
+If the stored selector fails to attach within `timeout`, the healer scans
+every frame on the page (main document, open shadow roots within it, and
+same- or cross-origin iframes) for elements of the same tag, scores each
+against the last-known-good fingerprint, and -- if a confident match is
+found -- rewrites the locator store with the new selector (and, if the match
+lives inside an iframe, the selector for that iframe too) and returns a
+working Locator for the *current* page.
+
+If the best match looks destructive (matches the risk deny-list -- "delete",
+"remove", "archive", ...), it is **not** auto-applied: it's queued to
+`locators.pending.json` and `HealingRequiresReviewError` is raised so a wrong
+guess can never auto-click something like "Delete" on a client's live CRM.
+Run `shl review` / `shl approve` to inspect and apply it.
+
+No LLM/network calls are involved; healing is pure DOM heuristics.
+
+For multi-client setups, pass `client_id=` instead of `store_path=` to keep
+each client's locator store, heal report, and pending queue isolated under
+`<base_dir>/<client_id>/`.
 
 Inline mode is also available for scripts that don't want a locator map:
 
@@ -24,34 +38,48 @@ test source file.
 from __future__ import annotations
 
 import inspect
-import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
-from playwright.sync_api import Locator, Page
+from playwright.sync_api import Frame, Locator, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from . import fingerprint as fp
-from .exceptions import HealingFailedError, LocatorNotFoundError
+from .exceptions import HealingFailedError, HealingRequiresReviewError, LocatorNotFoundError
 from .patcher import patch_source_selector
+from .risk import DEFAULT_RISK_KEYWORDS, is_risky
 from .scoring import similarity
-from .selector_builder import build_selector
-from .store import HealEvent, LocatorSpec, LocatorStore
+from .selector_builder import build_frame_selector, build_selector
+from .store import HealEvent, LocatorSpec, LocatorStore, PendingHeal
 
 
 class Healer:
     def __init__(
         self,
-        store_path: str | Path = "locators.yaml",
+        store_path: str | Path | None = None,
         *,
+        client_id: Optional[str] = None,
+        base_dir: str | Path = "locators",
         confidence_threshold: float = 0.6,
         timeout: float = 5000,
         auto_patch_source: bool = True,
+        require_review_for_risky: bool = True,
+        risk_keywords: Iterable[str] = DEFAULT_RISK_KEYWORDS,
     ):
+        if client_id is not None:
+            if store_path is not None:
+                raise ValueError("pass either store_path or client_id, not both")
+            store_path = Path(base_dir) / client_id / "locators.yaml"
+        elif store_path is None:
+            store_path = "locators.yaml"
+
+        self.client_id = client_id
         self.store = LocatorStore(store_path)
         self.confidence_threshold = confidence_threshold
         self.timeout = timeout
         self.auto_patch_source = auto_patch_source
+        self.require_review_for_risky = require_review_for_risky
+        self.risk_keywords = list(risk_keywords)
 
     # -- public API ---------------------------------------------------
 
@@ -78,7 +106,7 @@ class Healer:
                 )
             spec = self._learn(page, name, selector)
 
-        locator = page.locator(spec.selector)
+        locator = self._resolve_locator(page, spec)
         try:
             locator.wait_for(state="attached", timeout=timeout)
             return locator
@@ -105,7 +133,7 @@ class Healer:
         if spec is None:
             spec = self._learn(page, name, selector, source_file=caller.filename, source_line=caller.lineno)
 
-        locator = page.locator(spec.selector)
+        locator = self._resolve_locator(page, spec)
         try:
             locator.wait_for(state="attached", timeout=timeout)
             return locator
@@ -113,6 +141,38 @@ class Healer:
             return self._heal(page, name, spec, timeout)
 
     # -- internals ------------------------------------------------------
+
+    def _resolve_locator(self, page: Page, spec: LocatorSpec) -> Locator:
+        if spec.frame_selector:
+            return page.frame_locator(spec.frame_selector).locator(spec.selector)
+        return page.locator(spec.selector)
+
+    def _frame_selector_for(self, frame: Frame) -> Optional[str]:
+        try:
+            handle = frame.frame_element()
+            frame_fp = handle.evaluate(fp.ELEMENT_HANDLE_JS)
+            return build_frame_selector(frame_fp)
+        except Exception:
+            return None
+
+    def _find_frame_for_selector(self, page: Page, selector: str) -> tuple[Frame | Page, Optional[str]]:
+        if page.locator(selector).count() > 0:
+            return page.main_frame, None
+        for frame in page.frames:
+            if frame == page.main_frame:
+                continue
+            try:
+                if frame.locator(selector).count() == 0:
+                    continue
+            except Exception:
+                continue
+            frame_selector = self._frame_selector_for(frame)
+            if frame_selector:
+                return frame, frame_selector
+        raise LocatorNotFoundError(
+            f"Selector {selector!r} not found in the main frame or any of "
+            f"{max(len(page.frames) - 1, 0)} iframe(s)"
+        )
 
     def _learn(
         self,
@@ -123,36 +183,68 @@ class Healer:
         source_file: Optional[str] = None,
         source_line: Optional[int] = None,
     ) -> LocatorSpec:
-        element_fp = page.eval_on_selector(selector, fp.SINGLE_ELEMENT_JS)
+        owner_frame, frame_selector = self._find_frame_for_selector(page, selector)
+        element_fp = owner_frame.eval_on_selector(selector, fp.SINGLE_ELEMENT_JS)
         spec = LocatorSpec(
             name=name,
             selector=selector,
             fingerprint=element_fp,
+            frame_selector=frame_selector,
             source_file=source_file,
             source_line=source_line,
         )
         self.store.put(spec)
         return spec
 
-    def _collect_candidates(self, page: Page, tag: str) -> list[dict]:
-        return page.evaluate(fp.CANDIDATES_JS, tag)
+    def _collect_candidates(self, page: Page, tag: str) -> list[tuple[dict, Optional[str]]]:
+        results: list[tuple[dict, Optional[str]]] = []
+        for frame in page.frames:
+            try:
+                candidates = frame.evaluate(fp.CANDIDATES_JS, tag)
+            except Exception:
+                continue
+            if not candidates:
+                continue
+
+            frame_selector = None
+            if frame != page.main_frame:
+                frame_selector = self._frame_selector_for(frame)
+                if frame_selector is None:
+                    continue  # can't build a stable selector back to this frame; skip it
+
+            results.extend((candidate, frame_selector) for candidate in candidates)
+        return results
 
     def _heal(self, page: Page, name: str, spec: LocatorSpec, timeout: float) -> Locator:
         candidates = self._collect_candidates(page, spec.fingerprint.get("tag", ""))
         scored = sorted(
-            ((similarity(spec.fingerprint, c), c) for c in candidates),
-            key=lambda pair: pair[0],
+            ((similarity(spec.fingerprint, c), c, frame_selector) for c, frame_selector in candidates),
+            key=lambda triple: triple[0],
             reverse=True,
         )
 
-        best_score, best_fp = scored[0] if scored else (0.0, None)
+        best_score, best_fp, best_frame_selector = scored[0] if scored else (0.0, None, None)
         if best_fp is None or best_score < self.confidence_threshold:
             raise HealingFailedError(name, spec.selector, best_score, self.confidence_threshold)
 
         new_selector = build_selector(best_fp)
         old_selector = spec.selector
 
-        self.store.update_selector(name, new_selector, best_fp)
+        if self.require_review_for_risky and is_risky(best_fp, self.risk_keywords):
+            self.store.add_pending(
+                PendingHeal(
+                    name=name,
+                    old_selector=old_selector,
+                    new_selector=new_selector,
+                    frame_selector=best_frame_selector,
+                    fingerprint=best_fp,
+                    score=best_score,
+                    reason="best candidate matched the risk deny-list",
+                )
+            )
+            raise HealingRequiresReviewError(name, old_selector, new_selector, best_score)
+
+        self.store.update_selector(name, new_selector, best_fp, frame_selector=best_frame_selector)
         self.store.log_heal_event(
             HealEvent(name=name, old_selector=old_selector, new_selector=new_selector, score=best_score)
         )
@@ -160,6 +252,7 @@ class Healer:
         if self.auto_patch_source and spec.source_file:
             patch_source_selector(spec.source_file, spec.source_line, old_selector, new_selector)
 
-        locator = page.locator(new_selector)
+        healed_spec = self.store.get(name)
+        locator = self._resolve_locator(page, healed_spec)
         locator.wait_for(state="attached", timeout=timeout)
         return locator

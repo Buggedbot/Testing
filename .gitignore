@@ -5,3 +5,6 @@ __pycache__/
 .venv/
 demo/locators.yaml
 demo/locators.report.json
+demo/locators.pending.json
+/locators/
+*.pending.json

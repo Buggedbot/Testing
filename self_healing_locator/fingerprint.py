@@ -2,6 +2,15 @@
 text, position and parent context that is stable enough to re-identify an element
 after its selector (id/class) has changed, but detailed enough to tell it apart
 from unrelated elements on the page.
+
+Candidate collection recurses into *open* shadow roots (Playwright's own CSS
+engine pierces these too, so healed selectors resolve directly via
+`page.locator()`). Closed shadow roots aren't reachable from JS at all -- an
+inherent platform limitation, not something this library can work around.
+
+Cross-frame (iframe) coverage is handled at the Python level in healer.py by
+running these same scripts once per `page.frame`, since Playwright can
+evaluate inside frames regardless of same-origin restrictions.
 """
 
 # Shared extraction logic, nested inside each outer function below -- Playwright's
@@ -38,7 +47,20 @@ _EXTRACT_FN_BODY = """
             bbox: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },
             dom_index: domIndex,
             parent: parentInfo,
+            in_shadow_dom: el.getRootNode() !== document,
         };
+    }
+"""
+
+# Recursively collects document + every open shadow root reachable from it.
+_COLLECT_ROOTS_FN_BODY = """
+    function collectRoots(root, acc) {
+        acc.push(root);
+        const all = root.querySelectorAll("*");
+        for (const el of all) {
+            if (el.shadowRoot) collectRoots(el.shadowRoot, acc);
+        }
+        return acc;
     }
 """
 
@@ -50,18 +72,26 @@ SINGLE_ELEMENT_JS = f"""
 }}
 """
 
+# Used with elementHandle.evaluate(ELEMENT_HANDLE_JS) to fingerprint a known ElementHandle.
+ELEMENT_HANDLE_JS = SINGLE_ELEMENT_JS
+
 # Elements likely to be targeted by test locators.
 CANDIDATE_QUERY = (
     "a, button, input, select, textarea, label, "
     "[role], [onclick], [data-testid], [tabindex]"
 )
 
-# Used with page.evaluate(CANDIDATES_JS, tag) to collect fingerprints of same-tag
-# candidate elements across the whole page.
+# Used with frame.evaluate(CANDIDATES_JS, tag) to collect fingerprints of same-tag
+# candidate elements across a frame's document *and* every open shadow root in it.
 CANDIDATES_JS = f"""
 (tag) => {{
 {_EXTRACT_FN_BODY}
-    const nodes = Array.from(document.querySelectorAll("{CANDIDATE_QUERY}"));
+{_COLLECT_ROOTS_FN_BODY}
+    const roots = collectRoots(document, []);
+    let nodes = [];
+    for (const root of roots) {{
+        nodes = nodes.concat(Array.from(root.querySelectorAll("{CANDIDATE_QUERY}")));
+    }}
     const filtered = tag ? nodes.filter(n => n.tagName.toLowerCase() === tag) : nodes;
     return filtered.map(extract);
 }}

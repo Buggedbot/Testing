@@ -6,7 +6,7 @@ import argparse
 import sys
 from datetime import datetime
 
-from .store import LocatorStore
+from .store import HealEvent, LocatorSpec, LocatorStore
 
 
 def _cmd_init(args: argparse.Namespace) -> None:
@@ -23,7 +23,8 @@ def _cmd_list(args: argparse.Namespace) -> None:
         return
     for name, spec in sorted(specs.items()):
         heals = f" (healed {spec.heal_count}x)" if spec.heal_count else ""
-        print(f"{name:30s} {spec.selector}{heals}")
+        frame = f" [in frame: {spec.frame_selector}]" if spec.frame_selector else ""
+        print(f"{name:30s} {spec.selector}{frame}{heals}")
 
 
 def _cmd_report(args: argparse.Namespace) -> None:
@@ -38,6 +39,47 @@ def _cmd_report(args: argparse.Namespace) -> None:
             f"[{ts}] {event['name']}: {event['old_selector']} -> "
             f"{event['new_selector']} (confidence={event['score']:.2f})"
         )
+
+
+def _cmd_review(args: argparse.Namespace) -> None:
+    store = LocatorStore(args.path)
+    pending = store.list_pending()
+    if not pending:
+        print("Nothing pending review.")
+        return
+    for p in pending:
+        ts = datetime.fromtimestamp(p.created_at).strftime("%Y-%m-%d %H:%M:%S")
+        frame = f" [in frame: {p.frame_selector}]" if p.frame_selector else ""
+        print(f"[{ts}] {p.name}: {p.old_selector} -> {p.new_selector}{frame}")
+        print(f"    confidence={p.score:.2f}  reason={p.reason}")
+        print(f"    matched text: {p.fingerprint.get('text', '')!r}")
+
+
+def _cmd_approve(args: argparse.Namespace) -> None:
+    store = LocatorStore(args.path)
+    pending = store.pop_pending(args.name)
+    if pending is None:
+        print(f"No pending heal named '{args.name}'")
+        return 1
+    store.update_selector(pending.name, pending.new_selector, pending.fingerprint, frame_selector=pending.frame_selector)
+    store.log_heal_event(
+        HealEvent(
+            name=pending.name,
+            old_selector=pending.old_selector,
+            new_selector=pending.new_selector,
+            score=pending.score,
+        )
+    )
+    print(f"Approved: {pending.name} -> {pending.new_selector}")
+
+
+def _cmd_reject(args: argparse.Namespace) -> None:
+    store = LocatorStore(args.path)
+    pending = store.pop_pending(args.name)
+    if pending is None:
+        print(f"No pending heal named '{args.name}'")
+        return 1
+    print(f"Rejected: {pending.name} (was proposing {pending.new_selector})")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -57,9 +99,22 @@ def main(argv: list[str] | None = None) -> int:
     p_report.add_argument("-n", "--limit", type=int, default=20)
     p_report.set_defaults(func=_cmd_report)
 
+    p_review = sub.add_parser("review", help="Show heals withheld for looking destructive")
+    p_review.add_argument("path", nargs="?", default="locators.yaml")
+    p_review.set_defaults(func=_cmd_review)
+
+    p_approve = sub.add_parser("approve", help="Apply a pending heal")
+    p_approve.add_argument("name")
+    p_approve.add_argument("path", nargs="?", default="locators.yaml")
+    p_approve.set_defaults(func=_cmd_approve)
+
+    p_reject = sub.add_parser("reject", help="Discard a pending heal")
+    p_reject.add_argument("name")
+    p_reject.add_argument("path", nargs="?", default="locators.yaml")
+    p_reject.set_defaults(func=_cmd_reject)
+
     args = parser.parse_args(argv)
-    args.func(args)
-    return 0
+    return args.func(args) or 0
 
 
 if __name__ == "__main__":

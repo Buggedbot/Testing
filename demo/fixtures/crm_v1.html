@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>CRM Contact - v1</title></head>
+<body>
+  <!-- Simulates a Salesforce-Lightning-style component: the actual controls
+       live inside an open shadow root, not the light DOM. -->
+  <div id="contact-card-host"></div>
+  <script>
+    const host = document.getElementById("contact-card-host");
+    const shadow = host.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <div class="card">
+        <h2>Jane Doe</h2>
+        <button id="save-btn" type="button" class="btn btn-primary">Save</button>
+        <button id="cancel-btn" type="button" class="btn btn-secondary">Cancel</button>
+      </div>
+    `;
+  </script>
+
+  <!-- Simulates a Dynamics-365-style embedded record form. -->
+  <iframe id="notes-frame" title="Notes" src="crm_notes_v1.html"></iframe>
+</body>
+</html>

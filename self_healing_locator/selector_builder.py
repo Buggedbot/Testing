@@ -72,3 +72,31 @@ def build_selector(fp: Mapping[str, Any]) -> str:
     if dom_index is not None and dom_index >= 0:
         return f"{parent_selector}{base}:nth-of-type({dom_index + 1})"
     return f"{parent_selector}{base}"
+
+
+def build_frame_selector(fp: Mapping[str, Any]) -> str:
+    """Build a selector for an <iframe> element itself, for use with
+    `page.frame_locator(...)`. Preference: name > stable id > title > src path
+    > structural fallback (iframes rarely have data-testid, so it's skipped).
+    """
+    attrs = fp.get("attributes") or {}
+
+    if attrs.get("name"):
+        return f'iframe[name="{_css_escape(attrs["name"])}"]'
+
+    element_id = fp.get("id")
+    if element_id and not looks_dynamic(element_id):
+        return f"iframe#{element_id}" if re.match(r"^[A-Za-z][\w-]*$", element_id) else f'iframe[id="{_css_escape(element_id)}"]'
+
+    if attrs.get("title"):
+        return f'iframe[title="{_css_escape(attrs["title"])}"]'
+
+    src = attrs.get("src")
+    if src:
+        path = src.split("?")[0]
+        return f'iframe[src*="{_css_escape(path)}"]'
+
+    dom_index = fp.get("dom_index")
+    if dom_index is not None and dom_index >= 0:
+        return f"iframe:nth-of-type({dom_index + 1})"
+    return "iframe"
