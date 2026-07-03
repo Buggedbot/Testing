@@ -1,3 +1,4 @@
+from self_healing_locator import copilot_assist
 from self_healing_locator.cli import main
 from self_healing_locator.store import HealEvent, LocatorSpec, LocatorStore, PendingHeal
 
@@ -81,3 +82,36 @@ def test_review_and_reject_flow(tmp_path, capsys):
     reloaded = LocatorStore(path)
     assert reloaded.get("cancel_btn").selector == "#cancel"  # unchanged
     assert reloaded.list_pending() == []
+
+
+def test_assist_lists_pending_copilot_chat_prompts(tmp_path, capsys):
+    path = tmp_path / "locators.yaml"
+    copilot_assist.record_assist(
+        path, "login_button", "#login-btn", {"tag": "button", "text": "Log In"}, [], reason="no confident match"
+    )
+
+    main(["assist", str(path)])
+    out = capsys.readouterr().out
+    assert "login_button" in out
+    assert "assist.md" in out
+
+
+def test_assist_apply_sets_selector_and_clears_entry(tmp_path, capsys):
+    path = tmp_path / "locators.yaml"
+    store = LocatorStore(path)
+    store.put(LocatorSpec(name="login_button", selector="#login-btn", fingerprint={"tag": "button"}))
+    copilot_assist.record_assist(
+        path, "login_button", "#login-btn", {"tag": "button", "text": "Log In"}, [], reason="no confident match"
+    )
+
+    main(["assist-apply", "login_button", "#new-login-btn", str(path)])
+    out = capsys.readouterr().out
+    assert "Applied" in out
+    assert "source=copilot_chat" in out
+
+    reloaded = LocatorStore(path)
+    assert reloaded.get("login_button").selector == "#new-login-btn"
+    assert copilot_assist.pending_assist_names(path) == []
+
+    events = reloaded.heal_events()
+    assert events[-1]["source"] == "copilot_chat"

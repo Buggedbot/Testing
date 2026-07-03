@@ -6,5 +6,9 @@ __pycache__/
 demo/locators.yaml
 demo/locators.report.json
 demo/locators.pending.json
+demo/locators.assist.json
+demo/locators.assist.md
 /locators/
 *.pending.json
+*.assist.json
+*.assist.md

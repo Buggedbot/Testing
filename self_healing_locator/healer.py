@@ -44,6 +44,13 @@ change based on which tier found the match, and a backend that can't answer
 just means healing falls through to `HealingFailedError` like any other
 low-confidence case.
 
+If the only AI tooling available is GitHub Copilot's IDE integration (VS
+Code / JetBrains chat), there's no headless entry point at all -- pass
+`copilot_assist=True` instead. On a `HealingFailedError`, the healer writes
+the target/candidate data to `<store>.assist.md` next to the locator store: a
+ready-to-paste Copilot Chat prompt per broken locator. A developer runs it
+through chat by hand and applies the answer with `shl assist-apply`.
+
 For multi-client setups, pass `client_id=` instead of `store_path=` to keep
 each client's locator store, heal report, and pending queue isolated under
 `<base_dir>/<client_id>/`.
@@ -65,7 +72,7 @@ from typing import Any, Iterable, Optional
 from playwright.sync_api import Frame, Locator, Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from . import fingerprint as fp
+from . import copilot_assist, fingerprint as fp
 from . import llm_healer
 from .exceptions import HealingFailedError, HealingRequiresReviewError, LocatorNotFoundError
 from .patcher import patch_source_selector
@@ -92,6 +99,7 @@ class Healer:
         llm_model: str = llm_healer.MODEL_DEFAULT,
         llm_min_confidence: float = 0.6,
         llm_max_candidates: int = 15,
+        copilot_assist: bool = False,
     ):
         if client_id is not None:
             if store_path is not None:
@@ -112,6 +120,7 @@ class Healer:
         self.llm_model = llm_model
         self.llm_min_confidence = llm_min_confidence
         self.llm_max_candidates = llm_max_candidates
+        self.copilot_assist = copilot_assist
 
     # -- public API ---------------------------------------------------
 
@@ -301,10 +310,25 @@ class Healer:
                 source = "llm"
 
         if best_fp is None or best_score < self.confidence_threshold:
+            if self.copilot_assist:
+                copilot_assist.record_assist(
+                    self.store.path,
+                    name,
+                    spec.selector,
+                    spec.fingerprint,
+                    [candidate_fp for _, candidate_fp, _ in scored[: self.llm_max_candidates]],
+                    reason=(
+                        f"best candidate scored {best_score:.2f}, below "
+                        f"confidence_threshold {self.confidence_threshold:.2f}"
+                    ),
+                )
             raise HealingFailedError(name, spec.selector, best_score, self.confidence_threshold)
 
         new_selector = build_selector(best_fp)
         old_selector = spec.selector
+
+        if self.copilot_assist:
+            copilot_assist.clear_assist(self.store.path, name)
 
         if self.require_review_for_risky and is_risky(best_fp, self.risk_keywords):
             self.store.add_pending(

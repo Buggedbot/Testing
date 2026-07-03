@@ -154,6 +154,8 @@ shl report  locators.yaml               # show the healing event history
 shl review  locators.yaml               # show heals withheld for looking destructive
 shl approve <name> locators.yaml        # apply a pending heal
 shl reject  <name> locators.yaml        # discard a pending heal
+shl assist  locators.yaml               # list locators with a Copilot Chat prompt waiting
+shl assist-apply <name> <selector> locators.yaml   # apply a selector obtained by hand
 ```
 
 ### Optional GenAI fallback tier
@@ -195,6 +197,34 @@ widens what gets auto-applied without review. Every heal event records which
 tier produced it (`source: "heuristic"` or `"llm"`), visible via
 `shl report`.
 
+### When the only AI tooling is IDE-only Copilot (no CLI, no API)
+
+If GitHub Copilot is *only* available as the VS Code / JetBrains chat
+extension, `llm_fallback` doesn't apply — there's no callable API or CLI at
+all for a headless test process to reach. Use `copilot_assist=True` instead:
+
+```python
+healer = Healer("locators.yaml", copilot_assist=True)
+```
+
+On a `HealingFailedError` (nothing scored confidently), the healer writes the
+same target/candidate data as the GenAI tier would have sent to an API into
+`locators.assist.md` — one section per broken locator, each with a
+ready-to-paste Copilot Chat prompt. The workflow:
+
+1. Run your tests. A failure writes/updates `locators.assist.md`.
+2. Open it, paste a locator's prompt block into Copilot Chat, and read its answer.
+3. Pick a CSS selector based on the answer and apply it:
+   ```bash
+   shl assist-apply login_button "#new-login-btn" locators.yaml
+   ```
+4. Re-run your tests. The entry clears automatically the next time that
+   locator heals by any means (heuristic, LLM tier, or another `assist-apply`).
+
+This is fundamentally a human-in-the-loop workflow, not automated healing —
+appropriate given the constraint, but don't expect it to run unattended in
+CI the way heuristic or `llm_fallback` healing can.
+
 ## Demos
 
 Two narrated end-to-end scenarios, run against a real headless Chromium via
@@ -225,6 +255,7 @@ self_healing_locator/
   selector_builder.py   # turns a healed fingerprint back into a CSS selector (element + iframe)
   risk.py                 # destructive-candidate deny-list
   llm_healer.py            # opt-in GenAI fallback tier (pluggable backend: Copilot CLI / Claude / custom)
+  copilot_assist.py         # file-based hand-off for IDE-only Copilot (no callable API/CLI)
   store.py               # locators.yaml + healing report + pending-review persistence
   patcher.py              # rewrites inline selector literals in test source
   healer.py               # Healer: locate() / locate_inline() / multi-frame heal orchestration
