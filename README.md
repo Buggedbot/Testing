@@ -10,6 +10,13 @@ run just works — no LLM calls required, no flaky retries on the wrong
 element. An opt-in GenAI tier (see below) can pick up cases the heuristics
 can't confidently resolve on their own.
 
+> **Also in this repo:** [`qe_genai/`](qe_genai/) — a GenAI toolkit for the
+> wider QE workflow (failure triage, ADO bug drafting, flaky analysis,
+> coverage gaps, manual→automation conversion, test data, release summaries,
+> runbooks, plus VS Code Copilot agents/chat modes), all built for
+> environments where the only AI access is GitHub Copilot in the IDE. It's
+> independent of the healer — Selenium-only teams can use it standalone.
+
 ## How it works
 
 1. **Learn**: the first time a named locator is used, the agent snapshots an

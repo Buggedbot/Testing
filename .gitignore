@@ -12,3 +12,4 @@ demo/locators.assist.md
 *.pending.json
 *.assist.json
 *.assist.md
+qe_prompts/
